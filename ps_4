@@ -1,0 +1,435 @@
+from PIL import Image, ImageDraw, ImageFont
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import numpy as np
+import pandas as pd
+import PIL, PIL.Image
+import scipy
+import scipy.stats as st
+
+#####################
+# Begin helper code #
+#####################
+
+def calculate_std(upper, mean):
+    """
+	Calculate standard deviation based on the upper 95th percentile
+
+	Args:
+		upper: a 1-d numpy array with length N, representing the 95th percentile
+            values from N data points
+		mean: a 1-d numpy array with length N, representing the mean values from
+            the corresponding N data points
+
+	Returns:
+		a 1-d numpy array of length N, with the standard deviation corresponding
+        to each value in upper and mean
+	"""
+    return (upper - mean) / st.norm.ppf(.975)
+
+
+def interp(target_year, input_years, years_data):
+    """
+	Interpolates data for a given year, based on the data for the years around it
+
+	Args:
+		target_year: an integer representing the year which you want the predicted
+            sea level rise for
+		input_years: a 1-d numpy array that contains the years for which there is data
+		    (can be thought of as the "x-coordinates" of data points)
+        years_data: a 1-d numpy array representing the current data values
+            for the points which you want to interpolate, eg. the SLR mean per year data points
+            (can be thought of as the "y-coordinates" of data points)
+
+	Returns:
+		the interpolated predicted value for the target year
+	"""
+    return np.interp(target_year, input_years, years_data, right=-99)
+
+
+def load_data():
+    """
+	Loads data from sea_level_change.csv and puts it into numpy arrays
+
+	Returns:
+		a length 3 tuple of 1-d numpy arrays:
+		    1. an array of years as ints
+		    2. an array of 2.5th percentile sea level rises (as floats) for the years from the first array
+		    3. an array of 97.5th percentile of sea level rises (as floats) for the years from the first array
+        eg.
+            (
+                [2020, 2030, ..., 2100],
+                [3.9, 4.1, ..., 5.4],
+                [4.4, 4.8, ..., 10]
+            )
+            can be interpreted as:
+                for the year 2020, the 2.5th percentile SLR is 3.9ft, and the 97.5th percentile would be 4.4ft.
+	"""
+    df = pd.read_csv('sea_level_change.csv')
+    df.columns = ['Year', 'Lower', 'Upper']
+    return (df.Year.to_numpy(), df.Lower.to_numpy(), df.Upper.to_numpy())
+
+
+###################
+# End helper code #
+###################
+
+
+##########
+# Part 1 #
+##########
+
+def predicted_sea_level_rise(show_plot=False):
+    """
+	Creates a numpy array from the data in sea_level_change.csv where each row
+    contains a year, the mean sea level rise for that year, the 2.5th percentile
+    sea level rise for that year, the 97.5th percentile sea level rise for that
+    year, and the standard deviation of the sea level rise for that year. If
+    the year is between 2020 and 2100 and not included in the data, the values
+    for that year should be interpolated. If show_plot, displays a plot with
+    mean and the 95%, assuming sea level rise follows a linear trend.
+
+	Args:
+		show_plot: displays desired plot if true
+
+	Returns:
+		a 2-d numpy array with each row containing a year in order from 2020-2100
+        inclusive, mean, the 2.5th percentile, 97.5th percentile, and standard
+        deviation of the sea level rise for the given year
+	"""
+    to_add = []
+    data = load_data()
+    d = {}
+    x_prep = []
+    y_prep = []
+    z_prep = []
+    zlow_prep = []
+    n = 0
+    while n < len(data[0]):
+        d[data[0][n]] = (data[1][n], data[2][n])
+        mean = (data[1][n]+data[2][n])/2
+        x_prep.append(data[0][n])
+        y_prep.append(mean)
+        z_prep.append(data[2][n])
+        zlow_prep.append(data[1][n])
+        n += 1
+    x = np.array(x_prep)
+    y = np.array(y_prep)
+    z = np.array(z_prep)
+    zlow = np.array(zlow_prep)
+    year = 2020
+    while year < 2101:
+        if year in data[0]:
+            mean = (d[year][0]+d[year][1])/2
+            row = [year, mean, d[year][0], d[year][1], calculate_std(d[year][1], mean)]
+            to_add.append(row)
+        else:
+            mean = interp(year, x, y)
+            upper = interp(year, x, z)
+            lower = interp(year, x, zlow)
+            stdev = calculate_std(upper, mean)
+            row = [year, mean, lower, upper, stdev]
+            to_add.append(row)
+        year+=1
+    array1 = np.array(to_add)
+    if show_plot:
+        plt.plot(array1[:,0],array1[:,1])
+        plt.plot(array1[:,0],array1[:,2])
+        plt.plot(array1[:,0],array1[:,3])
+    return array1
+            
+        
+
+
+def simulate_year(data, year, num):
+    """
+	Simulates the sea level rise for a particular year based on that year's
+    mean and standard deviation, assuming a normal distribution.
+
+	Args:
+		data: a 2-d numpy array with each row containing a year in order from 2020-2100
+            inclusive, mean, the 2.5th percentile, 97.5th percentile, and standard
+            deviation of the sea level rise for the given year
+		year: the year to simulate sea level rise for
+        num: the number of samples you want from this year
+
+	Returns:
+		a 1-d numpy array of length num, that contains num simulated values for
+        sea level rise during the year specified
+	"""
+    for row in data:
+        if row[0] == year:
+            mean = row[1]
+            stdev = row[4]
+            break
+    to_add = []
+    for trial in range(num):
+        rise = np.random.normal(mean, stdev)
+        to_add.append(rise)
+    return np.array(to_add)
+    
+def plot_simulation(data):
+    """
+	Runs and plots a Monte Carlo simulation, based on the values in data and
+    assuming a normal distribution. Five hundred samples should be generated
+    for each year.
+
+	Args:
+		data: a 2-d numpy array with each row containing a year in order from 2020-2100
+            inclusive, mean, the 2.5th percentile, 97.5th percentile, and standard
+            deviation of the sea level rise for the given year
+	"""
+    year = 2020
+    data = predicted_sea_level_rise()
+    while year < 2100:
+        plt.plot(year, simulate_year(data, year, 1))
+        year += 1 
+    
+
+##########
+# Part 2 #
+##########
+
+def simulate_water_levels(data):
+    """
+	Simulates the water level for all years in the range 2020 to 2100, inclusive.
+
+	Args:
+		data: a 2-d numpy array with each row containing a year in order from 2020-2100
+            inclusive, mean, the 2.5th percentile, 97.5th percentile, and standard
+            deviation of the sea level rise for the given year
+
+	Returns:
+		a list of simulated water levels for each year, in the order in which
+        they would occur temporally
+	"""
+    year = 2020
+    data = predicted_sea_level_rise()
+    levels = []
+    while year < 2101:
+        levels.append(simulate_year(data, year, 1))
+        year += 1 
+    # print(levels, "LEVELS")
+    return levels
+
+
+def repair_only(water_level_list, water_level_loss_no_prevention, house_value=400000):
+    """
+	Simulates the water level for all years in the range 2020 to 2100, inclusive,
+    and calculates damage costs in 1000s resulting from a particular water level
+    for each year dependent on a repair only strategy, where you would only pay
+    to repair damage that already happened.
+
+    The specific damage cost can be calculated using the numpy array
+    water_level_loss_no_prevention, where each water level corresponds to the
+    percent of property that is damaged.
+
+    The repair only strategy is as follows:
+        1) If the water level is less than or equal to 5ft, the cost is 0.
+        2) If the water level is between 5ft and 10ft, the cost is the
+           house_value times the percentage of property damage for that water
+           level. If the water level is not an integer value, the percentage
+           should be interpolated.
+        3) If the water level is at least 10ft, the cost is the entire value of
+           the house.
+
+	Args:
+		water_level_list: list of simulated water levels for 2020-2100
+        water_level_loss_no_prevention: a 2-d numpy array where the first column is
+            the SLR levels and the second column is the corresponding property damage expected
+            from that water level with no flood prevention (as an integer percentage)
+        house_value: the value of the property we are estimating cost for
+
+	Returns:
+		an list of damage costs in 1000s, in the order in which the costs would
+        be incurred temporally
+	"""
+    array1 = water_level_loss_no_prevention
+    column1 = np.ones((len(array1), 1))
+    column2 = np.ones((len(array1), 1))*0.01
+    array_multiplies = np.column_stack((column1, column2))
+    array2 = array1*array_multiplies
+    f = scipy.interpolate.interp1d(array2[:,0], array2[:,1], fill_value='extrapolate')
+    all_values = []
+    for level in water_level_list:
+        if level<5:
+            damage_prop = 0
+        elif level>10:
+            damage_prop = 1
+        else:
+            damage_prop = f(level)
+        all_values.append(damage_prop*house_value*0.001)
+    return all_values
+
+def wait_a_bit(water_level_list, water_level_loss_no_prevention, water_level_loss_with_prevention, house_value=400000,
+               cost_threshold=100000):
+    """
+	Simulates the water level for all years in the range 2020 to 2100, inclusive,
+    and calculates damage costs in 1000s resulting from a particular water level
+    for each year dependent on a wait a bit to repair strategy, where you start
+    flood prevention measures after having a year with an excessive amount of
+    damage cost.
+
+    The specific damage cost can be calculated using the numpy array
+    water_level_loss_no_prevention and water_level_loss_with_prevention, where
+    each water level corresponds to the percent of property that is damaged.
+    You should be using water_level_loss_no_prevention when no flood prevention
+    measures are in place, and water_level_loss_with_prevention when there are
+    flood prevention measures in place.
+
+    Flood prevention measures are put into place if you have any year with a
+    damage cost above the cost_threshold.
+
+    The wait a bit to repair only strategy is as follows:
+        1) If the water level is less than or equal to 5ft, the cost is 0.
+        2) If the water level is between 5ft and 10ft, the cost is the
+           house_value times the percentage of property damage for that water
+           level, which is affected by the implementation of flood prevention
+           measures. If the water level is not an integer value, the percentage
+           should be interpolated.
+        3) If the water level is at least 10ft, the cost is the entire value of
+           the house.
+
+	Args:
+		water_level_list: list of simulated water levels for 2020-2100
+        water_level_loss_no_prevention: a 2-d numpy array where the columns are
+            water levels and the corresponding percent of property damage expected
+            from that water level with no flood prevention
+        water_level_loss_with_prevention: a 2-d numpy array where the columns are
+            water levels and the corresponding percent of property damage expected
+            from that water level with flood prevention
+        house_value: the value of the property we are estimating cost for
+        cost_threshold: the amount of cost incurred before flood prevention
+            measures are put into place
+
+	Returns:
+		an list of damage costs in 1000s, in the order in which the costs would
+        be incurred temporally
+	"""
+    array1 = water_level_loss_no_prevention
+    column1 = np.ones((len(array1), 1))
+    column2 = np.ones((len(array1), 1))*0.01
+    array_multiplies = np.column_stack((column1, column2))
+    array2 = array1*array_multiplies
+    arraywith = water_level_loss_with_prevention*array_multiplies
+    f1 = scipy.interpolate.interp1d(array2[:,0], array2[:,1], fill_value='extrapolate')
+    f2 = scipy.interpolate.interp1d(arraywith[:,0], arraywith[:,1], fill_value='extrapolate')
+    all_values = []
+    prevention = False
+    for level in water_level_list:
+        if prevention:
+            if level<5:
+                damage_prop = 0
+            elif level>10:
+                damage_prop = 1
+            else:
+                damage_prop = f2(level)
+            all_values.append(damage_prop*house_value*0.001)
+        else:
+            if level<5:
+                damage_prop = 0
+            elif level>10:
+                damage_prop = 1
+            else:
+                damage_prop = f1(level)
+                if damage_prop*house_value > cost_threshold:
+                    prevention = True
+            all_values.append(damage_prop*house_value*0.001)
+    return all_values
+
+
+
+def prepare_immediately(water_level_list, water_level_loss_with_prevention, house_value=400000):
+    """
+	Simulates the water level for all years in the range 2020 to 2100, inclusive,
+    and calculates damage costs in 1000s resulting from a particular water level
+    for each year dependent on a prepare immediately strategy, where you start
+    flood prevention measures immediately.
+
+    The specific damage cost can be calculated using the numpy array
+    water_level_loss_with_prevention, where each water level corresponds to the
+    percent of property that is damaged.
+
+    The prepare immediately strategy is as follows:
+        1) If the water level is less than or equal to 5ft, the cost is 0.
+        2) If the water level is between 5ft and 10ft, the cost is the
+           house_value times the percentage of property damage for that water
+           level, which is affected by the implementation of flood prevention
+           measures. If the water level is not an integer value, the percentage
+           should be interpolated.
+        3) If the water level is at least 10ft, the cost is the entire value of
+           the house.
+
+	Args:
+		water_level_list: list of simulated water levels for 2020-2100
+        water_level_loss_with_prevention: a 2-d numpy array where the columns are
+            water levels and the corresponding percent of property damage expected
+            from that water level with flood prevention
+        house_value: the value of the property we are estimating cost for
+
+	Returns:
+		an list of damage costs in 1000s, in the order in which the costs would
+        be incurred temporally
+	"""
+    array1 = water_level_loss_with_prevention
+    column1 = np.ones((len(array1), 1))
+    column2 = np.ones((len(array1), 1))*0.01
+    array_multiplies = np.column_stack((column1, column2))
+    arraywith = array1*array_multiplies
+    f2 = scipy.interpolate.interp1d(arraywith[:,0], arraywith[:,1], fill_value='extrapolate')
+    all_values = []
+    for level in water_level_list:
+        if level<5:
+            damage_prop = 0
+        elif level>10:
+            damage_prop = 1
+        else:
+            damage_prop = f2(level)
+        all_values.append(damage_prop*house_value*0.001)
+    return all_values
+
+
+def plot_strategies(data, water_level_loss_no_prevention, water_level_loss_with_prevention, house_value=400000,
+                    cost_threshold=100000):
+    """
+	Runs and plots a Monte Carlo simulation of all of the different preparation
+    strategies, based on the values in data and assuming a normal distribution.
+    Five hundred samples should be generated for each year.
+
+	Args:
+		data: a 2-d numpy array with each row containing a year in order from 2020-2100
+            inclusive, the 5th percentile, 95th percentile, mean, and standard
+            deviation of the sea level rise for the given year
+        water_level_loss_no_prevention: a 2-d numpy array where the columns are
+            water levels and the corresponding percent of property damage expected
+            from that water level with no flood prevention
+        water_level_loss_with_prevention: a 2-d numpy array where the columns are
+            water levels and the corresponding percent of property damage expected
+            from that water level with flood prevention
+        house_value: the value of the property we are estimating cost for
+        cost_threshold: the amount of cost incurred before flood prevention
+            measures are put into place
+	"""
+    no_prev = repair_only(simulate_water_levels(data), water_level_loss_no_prevention)
+    late_prev = wait_a_bit(simulate_water_levels(data), water_level_loss_no_prevention, water_level_loss_with_prevention)
+    prev = prepare_immediately(simulate_water_levels(data), water_level_loss_with_prevention)
+    year = 2020
+    while year < 2100:
+        plt.plot(year, no_prev[year-2020])
+        plt.plot(year, late_prev[year-2020])
+        plt.plot(year, prev[year-2020])
+        year += 1
+
+
+
+if __name__ == '__main__':
+    
+    # Comment out the 'pass' statement below to run the lines below it
+    pass 
+
+    # # Uncomment the following lines to plot generate plots
+    data = predicted_sea_level_rise()
+    water_level_loss_no_prevention = np.array([[5, 6, 7, 8, 9, 10], [0, 10, 25, 45, 75, 100]]).T
+    water_level_loss_with_prevention = np.array([[5, 6, 7, 8, 9, 10], [0, 5, 15, 30, 70, 100]]).T
+    plot_simulation(data)
+    plot_strategies(data, water_level_loss_no_prevention, water_level_loss_with_prevention)
