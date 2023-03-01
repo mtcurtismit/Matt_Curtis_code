@@ -1,0 +1,280 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 18 16:37:45 2023
+@author: MATTH
+"""
+"""
+Our monster Pokerbot, written in Python.
+Currently designed to bet only based on the preflop.
+Seems to beat the lecture 1 bot.
+"""
+import random
+from typing import Optional
+import numpy
+from tabulate import tabulate
+
+# from sklearn.cluster import kmeans
+import eval7
+
+from skeleton.actions import FoldAction, CallAction, CheckAction, RaiseAction
+from skeleton.states import GameState, TerminalState, RoundState
+from skeleton.states import NUM_ROUNDS, STARTING_STACK, BIG_BLIND, SMALL_BLIND
+from skeleton.unpacked import TableState, PlayerState, read_cards, Street
+from skeleton.bot import Bot
+from skeleton.runner import parse_args, run_bot
+
+from skeleton.ops import SBStart, BBCheck, BBRaise, BBAllIn
+from skeleton.calc import calc_strength
+from pokertable import PokerTable
+
+
+class Player(Bot):
+    """
+    THE pokerbot.
+    """
+
+    def __init__(self):
+        """
+        Called when a new game starts. Called exactly once.
+        Arguments:
+        Nothing.
+        Returns:
+        Nothing.
+        """
+        self.big_blind: Optional[bool] = None
+        self.pt = PokerTable()
+        print("Bot successfully initialized")
+
+    def handle_new_round(
+        self, game_state: GameState, round_state: RoundState, active: int
+    ):
+        """
+        Called when a new round starts. Called NUM_ROUNDS times.
+        Arguments:
+        game_state: the GameState object.
+        round_state: the RoundState object.
+        active: your player's index.
+        Returns:
+        Nothing.
+        """
+        # my_bankroll = game_state.bankroll  # the total number of chips you've gained or lost from the beginning of the game to the start of this round
+        # game_clock = game_state.game_clock  # the total number of seconds your bot has left to play this game
+        # round_num = game_state.round_num  # the round number from 1 to NUM_ROUNDS
+        # my_cards = round_state.hands[active]  # your cards
+        self.big_blind = bool(active)  # True if you are the big blind
+        self.preflop_bet = 0
+        self.river_bet = 0
+        self.run_bet = 0
+        self.postflop_bet = 0
+        self.turn_bet = 0
+
+    def handle_round_over(
+        self, game_state: GameState, terminal_state: TerminalState, active: int
+    ):
+        """
+        Called when a round ends. Called NUM_ROUNDS times.
+        Arguments:
+        game_state: the GameState object.
+        terminal_state: the TerminalState object.
+        active: your player's index.
+        Returns:
+        Nothing.
+        """
+        my_delta = terminal_state.deltas[active]  # your bankroll change from this round
+        previous_state = terminal_state.previous_state  # RoundState before payoffs
+        street = (
+            previous_state.street
+        )  # int of street representing when this round ended
+        # my_cards = previous_state.hands[active]  # your cards
+        # opp_cards = previous_state.hands[1-active]  # opponent's cards or [] if not revealed
+
+        table = TableState(terminal_state.previous_state)
+        opp = PlayerState(terminal_state.previous_state, 1 - active)
+        if street == 5:
+            self.river_bet = abs(my_delta) - self.turn_bet
+        elif street == 6:
+            self.run_bet = abs(my_delta) - self.river_bet
+        else:
+            self.run_bet += abs(my_delta) - self.run_bet
+        self.cards_down = table.cards
+        if opp.cards != []:
+            self.pt.new_row(
+                opp.cards,
+                self.preflop_bet,
+                self.postflop_bet,
+                self.turn_bet,
+                self.river_bet,
+                self.run_bet,
+                self.cards_down,
+            )
+
+    def get_action(self, game_state: GameState, round_state: RoundState, active: int):
+        """
+        Where the magic happens - your code should implement this function.
+        Called any time the engine needs an action from your bot.
+        Arguments:
+        game_state: the GameState object.
+        round_state: the RoundState object.
+        active: your player's index.
+        Returns:
+        Your action.
+        """
+        table = TableState(round_state)
+        me = PlayerState(round_state, active)
+        opp = PlayerState(round_state, 1 - active)
+        round_num = game_state.round_num
+        street = round_state.street
+
+        continuecost = opp.pip - me.pip  # the number of chips needed to stay in the pot
+
+        (
+            min_raise,
+            max_raise,
+        ) = (
+            round_state.raise_bounds()
+        )  # the smallest and largest numbers of chips for a legal bet/raise
+        min_cost = min_raise - me.pip  # the cost of a minimum bet/raise
+        max_cost = max_raise - me.pip  # the cost of a maximum bet/raise
+
+        if street == 0:
+            self.preflop_bet = 0
+            print(f"Preflop: {table.cards}, {me.cards}")
+            if not self.big_blind:
+                # initiate small blind action
+                print("Small blind action")
+
+                if RaiseAction in table.legal_actions:
+                    state = SBStart.get_op(me.cards)
+                    self.preflop_bet = opp.pip
+                    if state == SBStart.ALL_IN:
+                        return RaiseAction(max_raise)
+                    elif state == SBStart.HIGH_RAISE:
+                        return RaiseAction(min(max_raise, 100))
+                    elif state == SBStart.CALL:
+                        return CallAction()
+                    else:
+                        return FoldAction()
+                else:  # XXX: lol this is a cludged
+                    return CallAction()
+            else:
+                # initiate big blind action
+                print("Big blind action")
+
+                if opp.pip == me.pip:  # opp check-call
+                    print("opp check-call")
+                    state = BBCheck.get_op(me.cards)
+                    self.preflop_bet = opp.pip
+                    if state == BBCheck.ALL_IN:
+                        return RaiseAction(max_raise)
+                    elif state == BBCheck.CALL:
+                        return CheckAction()
+                elif opp.stack == 0:  # opp all in
+                    print("opp all in")
+                    state = BBAllIn.get_op(me.cards)
+                    self.preflop_bet = opp.pip
+                    if state == BBAllIn.CALL:
+                        return CallAction()
+                    elif state == BBAllIn.FOLD:
+                        return FoldAction()
+                else:  # opp raise
+                    print("opp raise")
+                    state = BBRaise.get_op(me.cards)
+                    self.preflop_bet = opp.pip
+                    if state == BBRaise.ALL_IN:
+                        return RaiseAction(max_raise)
+                    elif state == BBRaise.X3_RAISE:
+                        return RaiseAction(
+                            min(max_raise, 3 * opp.contribution - me.pip)
+                        )
+                    elif state == BBRaise.CALL:
+                        return CallAction()
+                    elif state == BBRaise.FOLD:
+                        return FoldAction()
+
+            raise ValueError("Should not reach here")
+        # Calculate pot status:
+        pot_total = me.contribution + opp.contribution
+
+        # Postflop opponent's hand range
+        raw = False
+        opp_proj_range = eval7.HandRange("A2+, K2+, Q2+, J3+, T6+, 97+, 22-88")
+        if round_num > 50:
+            if street == 3 and continuecost == 0:
+                opp_proj_range = self.pt.preflop_classes(pot_total / 2)
+                raw = True
+            else:
+                if continuecost == 0:
+                    on_table = table.cards[:-1]
+                else:
+                    on_table = table.cards
+                opp_proj_range = self.pt.RaiseAnalysis(
+                    pot_total, continuecost, on_table, opp_proj_range, raw
+                )
+                raw = True
+        # Recording bets
+        if continuecost == 0:
+            if street == 3:
+                self.preflop_bet = pot_total / 2
+            if street == 4:
+                self.postflop_bet = pot_total / 2 - self.preflop_bet
+            if street == 5:
+                self.turn_bet = pot_total / 2 - self.postflop_bet
+            if street == 6:
+                self.river_bet = pot_total / 2 - self.turn_bet
+            if street == 7:
+                self.run_bet = (pot_total / 2 - self.river_bet,)
+            if street > 7:
+                self.run_bet += pot_total / 2 - self.run_bet[-1]
+
+        # Normal game:
+        chances = self.pt.post_flop_analysis(me.cards, table.cards, opp_proj_range, raw)
+        (sf, sfdraw) = self.pt.straightflush(me.cards, table.cards, opp_proj_range, raw)
+        (fh, fhdraw) = self.pt.fullhouse(me.cards, table.cards, opp_proj_range, raw)
+        pv = self.pt.PotentialValue(me.cards, table.cards, opp_proj_range, raw)
+        my_action = "temp_action"
+        if continuecost == 0:
+            if chances > 0.45 and chances < 0.65 and pv < -0.1:
+                raise_amount = min(pot_total * 5, me.stack)
+            elif chances > 0.5:
+                raise_amount = min(pot_total / 2, me.stack)
+            else:
+                my_action = CheckAction()
+        else:
+            if (
+                chances > 0.45 and chances < 0.65 and pv < -0.1
+            ):  # The idea behind this is that we don't want the opponent to be able to see more cards, and thus we are trying to make them fold.
+                raise_amount = min(continuecost * 2.5, me.stack)
+            elif (
+                chances > 0.5
+            ):  # If we win more than half of the time, then we will always benefit by staying in the game
+                my_action = CallAction()
+            elif (
+                sfdraw == True and sf > 1 and chances > 0.3
+            ):  # This is equivalent to bluffing almost, where we have a decent chance of getting a straight or a flush and they don't.
+                raise_amount = min(continuecost * 2.5, me.stack)
+            elif (
+                fhdraw == True
+                and sfdraw == True
+                and fh > 2
+                and sf < 0.5
+                and chances > 0.3
+            ):  # Same as above, since having a full house beats a straight or a flush, and thus it is possible to win a lot of money on these hands.
+                raise_amount = min(continuecost * 2.5, me.stack)
+            else:
+                my_action = FoldAction()
+        if RaiseAction in table.legal_actions and (raise_amount <= me.stack):
+            temp_action = RaiseAction(raise_amount)
+
+        elif CallAction in table.legal_actions and (continuecost <= me.stack):
+            temp_action = CallAction()
+
+        elif CheckAction in table.legal_actions:
+            temp_action = CheckAction()
+        else:
+            if my_action == "temp_action":
+                my_action = FoldAction()
+        return my_action
+
+
+if __name__ == "__main__":
+    run_bot(Player(), parse_args())
