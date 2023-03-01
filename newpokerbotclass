@@ -1,0 +1,358 @@
+import random
+from typing import Optional
+import numpy
+from tabulate import tabulate
+from sklearn.cluster import KMeans
+
+from skeleton.actions import FoldAction, CallAction, CheckAction, RaiseAction
+from skeleton.states import GameState, TerminalState, RoundState
+from skeleton.states import NUM_ROUNDS, STARTING_STACK, BIG_BLIND, SMALL_BLIND
+from skeleton.unpacked import TableState, PlayerState, read_cards, Street
+from skeleton.bot import Bot
+from skeleton.runner import parse_args, run_bot
+
+from skeleton.ops import SBStart, BBCheck, BBRaise, BBAllIn
+from skeleton.calc import calc_strength
+
+class PokerTable(object):
+    #This is a way to store data while it is happening in the game
+    def __init__(self):
+        self.thearray = numpy.zeros((1,7))
+        self.deck = eval7.Deck()
+    def get_array(self):
+        return self.thearray
+    def new_row(self, shown_cards, preflop_action, postflop_action, turn_action, river_action, run_action, cards_down):
+        #Adds a data point into this array
+        newrow = [shown_cards, preflop_action, postflop_action, turn_action, river_action, run_action, cards_down]
+        self.thearray = numpy.vstack([self.thearray, newrow])
+        print('array row successfully added')
+    def cardconverter(self, cardrange):
+        #Takes an eval7.handrange and converts it into list of texts for the next function
+        cardrange_list = []
+        for hand in cardrange.hands:
+            card1 = str(hand[0][0])
+            card2 = str(hand[0][1])
+            cardrange_list.append(f'[{card1} {card2}]')
+        print('cards successfully converted')
+        return cardrange_list
+    def cardsimplifier(self, card):
+        #This turns the cards from the way they show up in the game log into the way you can put them in card ranges.
+        order = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2']
+        (val1, s1, val2, s2) = (card[1], card[2], card[4], card[5])
+        if s1 == s2:
+            news = 's'
+        elif s1 in ['h', 'd'] and s2 in ['h', 'd']:
+            news = 'r'
+        elif s1 in ['s', 'c'] and s2 in ['s', 'c']:
+            news = 'b'
+        else: news = 'o'
+        if val1 == val2:
+            final = f'{val1}{val2}{news}'
+        else:
+            final = ''
+            for num in order:
+                if num in (val1, val2):
+                    final += num
+            final += news
+        print('cards simplified')
+        return final
+    def card_sim_calc(self, card):
+        # This is a rough manual way to extrapolate the card range from cards that have already shown up
+        order = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2']
+        count1 = 0
+        count2 = 0
+        for num in order:
+            if card[0] == num:
+                break
+            count1 += 1
+        for num in order:
+            if card[1] == num:
+                break
+            count2 += 1
+        sim_list = []
+        suits = ['r', 'b', 'o']
+        if card[2] != 's' and count1 != count2:
+            suits.remove(card[2])
+            sim_list.append(card[0:1] + suits[1])
+            sim_list.append(card[0:1] + suits[0])
+            count3 = count2
+            while count3 != count1:
+                sim_list.append(order[count1] + order[count2] + card[2])
+                sim_list.append(order[count1] + order[count2] + suits[1])
+                sim_list.append(order[count1] + order[count2] + suits[0])
+                count3 -= 1
+            if count1 != 0:
+                count1 -= 1
+                count3 = count2
+                while count3 != count1:
+                    sim_list.append(order[count1] + order[count2] + card[2])
+                    sim_list.append(order[count1] + order[count2] + suits[1])
+                    sim_list.append(order[count1] + order[count2] + suits[0])
+                    count3 -= 1
+        return sim_list
+    def preflop_classes(self, pfbet):
+        '''
+        Parameters
+        ----------
+        pfbet : The total amount bet by the opponent in the preflop
+        PokerTable : The place we store the data
+        Returns
+        -------
+        This returns a predicted range of cards based on the amount the opponent bet in the preflop.
+        '''
+        order = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2']
+        allcombos = []
+        count = 0
+        for val1 in order:
+            for val2 in order[count:]:
+                if val1 == val2:
+                    for suit in ['r', 'b', 'o']:
+                        allcombos.append(f'{val1}{val2}{suit}')
+                else:
+                    for suit in ['s', 'r', 'b', 'o']:
+                        allcombos.append(f'{val1}{val2}{suit}')
+            count += 1
+
+        #-------------------------------------------------------------------------
+        pfdict = {}
+        for row in self.thearray[1:]:
+            cards = self.cardsimplifier(row[0])
+            if cards in pfdict:
+                pfdict[cards].append(row[1])
+            else: pfdict[cards] = [row[1]]
+        acd = {}
+        for card in allcombos:
+            if card in pfdict.keys():
+                acd[card] = pfdict[card]
+            else:
+                simlist = self.card_sim_calc(card)
+                if len(simlist) == 0:
+                    acd[card] = []
+                else:
+                    for altcard in simlist:
+                        if altcard in pfdict.keys():
+                            acd[card] = pfdict[altcard]
+                            break
+                        else:
+                            simlist.remove(altcard)
+        pfb = str(pfbet)
+        opp_range = []
+        for cards in acd.keys():
+            if pfb in acd[cards]:
+                opp_range.append(cards)
+        print(f'new range calculated: {opp_range}')
+        return opp_range
+    def raw_converter(self, opp_proj_range):
+        conversion_dict = {}
+        widest_range = eval7.handrange("A2+, K2+, Q2+, J3+, T6+, 97+, 22-88")
+        for hand in widest_range:
+            converted_hand = self.cardconverter(widest_range.hands)
+            handtocheck = self.cardsimplifier(hand)
+            if handtocheck in opp_proj_range:
+                conversion_dict[hand] = handtocheck
+        real_range = []
+        for hand in widest_range.hands:
+            if conversion_dict[hand] in opp_proj_range:
+                real_range.append((hand, 1.0))
+        return real_range
+    def post_flop_analysis(self, our_hand, flop, opp_proj_range, raw = False):
+        '''
+        Parameters
+        ----------
+        our_hand : Two cards
+        flop : Three Cards
+        opp_proj_range : The hands that we think our opponent could have
+        Returns
+        -------
+        The chance we will win the hand using a monte carlo simulation
+        '''
+        hand_num = len(opp_proj_range)
+        eval_result = 0
+        for trial in range(1000):
+            self.deck.shuffle()
+            if len(flop) == 3:
+                pbs = self.deck.deal(1)
+                river = self.deck.deal(1)
+                river_test = 'O'
+            if len(flop) == 4:
+                pbs = self.deck.deal(1)
+                river = pbs
+                river_test = 'X'
+            else:
+                pbs = self.deck.deal(1)
+                river_test = 'X'
+                river = pbs
+            while river.suit == 1 or river.suit == 2:
+                if river_test != 'X':
+                    pbs += river
+                river = self.deck.deal(1)
+            if river_test != 'X':
+                pbs += river
+            if raw:
+                real_range = self.raw_converter(opp_proj_range)
+                for hand in real_range:
+                    home = our_hand + flop + pbs
+                    away = hand[0] + flop + pbs
+                    if eval7.evaluate(home) > eval7.evaluate(away):
+                        eval_result += 1/hand_num
+            else:
+                for hand in opp_proj_range.hands:
+                    home = our_hand + flop + pbs
+                    away = hand[0] + flop + pbs
+                    if eval7.evaluate(home) > eval7.evaluate(away):
+                        eval_result += 1/hand_num
+        print(f'pfa success: eval_result/1000')
+        return eval_result/1000
+    def straightflush(self, our_hand, flop, opp_proj_range, raw = False):
+        '''
+        Parameters
+        ----------
+        our_hand : Two Cards
+        flop : Three Cards
+        opp_proj_range : The hands we think our opponent could have
+        Returns
+        -------
+        Our chance of having a straight or a flush against their chance of having a straight or a flush,
+        above 1 we have a higher chance, below one we have a lower chance.
+        '''
+        hand_num = len(opp_proj_range)
+        homesf = 0
+        awaysf = 0
+        draw = False
+        for trial in range(1000):
+            self.deck.shuffle()
+            pbs = self.deck.deal(1)
+            river = self.deck.deal(1)
+            while river.suit == 1 or river.suit == 2:
+                pbs += river
+                river = self.deck.deal(1)
+            pbs += river
+            home = eval7.evaluate(our_hand + flop + pbs)
+            if eval7.handtype(home) in ['Straight', 'Flush']:
+                homesf += 1
+            if raw:
+                rangehands = self.raw_converter(opp_proj_range)
+            else: rangehands = opp_proj_range.hands
+            for hand in rangehands:
+                away = eval7.evaluate(hand[0] + flop + pbs)
+                if eval7.handtype(away) in ['Straight', 'Flush']:
+                    awaysf += 1/hand_num
+            if awaysf > 300:
+                draw = True
+        print(f'sf success, {homesf/awaysf}, {draw}')
+        return (homesf/awaysf, draw)
+    def FullHouse(self, our_hand, flop, opp_proj_range, raw = False):
+        hand_num = len(opp_proj_range)
+        homefh = 0
+        awayfh = 0
+        draw = False
+        for trial in range(1000):
+            self.deck.shuffle()
+            pbs = self.deck.deal(1)
+            river = self.deck.deal(1)
+            while river.suit == 1 or river.suit == 2:
+                pbs += river
+                river = self.deck.deal(1)
+            pbs += river
+            home = eval7.evaluate(our_hand + flop + pbs)
+            if eval7.handtype(home) == 'FullHouse':
+                homefh += 1
+            if raw:
+                rangehands = self.raw_converter(opp_proj_range)
+            else: rangehands = opp_proj_range.hands
+            for hand in rangehands:
+                away = eval7.evaluate(hand[0] + flop + pbs)
+                if eval7.handtype(away) == 'FullHouse':
+                    awayfh += 1/hand_num
+        if awayfh > 300:
+            draw = True
+        print(f'Fullhouse: {homefh/awayfh}, {draw}')
+        return (homefh/awayfh, draw)
+    def PotentialValue(self, our_hand, flop, opp_proj_range, raw = False):
+        '''
+        A positive number means our chance of winning increases when more cards are played,
+        while a negative number means it decreases when more cards are played.
+        '''
+        hand_num = len(opp_proj_range)
+        potential = self.post_flop_analysis(our_hand, flop, opp_proj_range)
+        current = 0
+        home = eval7.evaluate(our_hand + flop)
+        if raw:
+            rangehands = self.raw_converter(opp_proj_range)
+        else: rangehands = opp_proj_range.hands
+        for hand in rangehands:
+            away = eval7.evaluate(hand[0]+flop)
+            if home > away:
+                current += 1/hand_num
+        print(f'Potential Value: {potential - current/1000}')
+        return potential - current/1000
+    def calc_flop_score(self, hand, flop):
+        possible_hand = hand + flop
+        flop_score = 0
+        for trial in range(1000):
+            self.deck.shuffle()
+            if len(flop) == 3:
+                temp_flop = self.deck.deal(3)
+                temp_hand = hand + temp_flop
+            else:
+                temp_flop = self.deck.deal(1)
+                temp_hand = hand + flop[:-1] + temp_flop
+            if eval7.evaluate(possible_hand) > eval7.evaluate(temp_hand):
+                flop_score += 1 / 1000
+        return flop_score
+    def RaiseAnalysis(self, pot, bet, flop, opp_proj_range, raw):
+        if raw:
+            rangehands = self.raw_converter(opp_proj_range)
+        else: rangehands = opp_proj_range.hands
+        chancedict = {}
+        for hand in rangehands:
+            chancedict[hand] = self.calc_flop_score(hand, flop)
+        data = []
+        row_index = {3:2, 4:3, 5:4}
+        #^length of flop versus which column to take from the array
+        max_bet = 0
+        for row in self.thearray[1:]:
+            cards = self.cardsimplifier(row[0])
+            cards_down = row[6]
+            past_pot = 0
+            if len(flop) > 5:
+                past_bet = row[5][len(flop-6)]
+                for col in range(1, 5):
+                    past_pot += row[col]
+                for num in row[5]:
+                    past_pot += num
+            else:
+                past_bet = row[row_index[len[flop]]]
+                for col in range(1, row_index[len[flop]]):
+                    past_pot += row[col]
+            data.append([self.calc_flop_score(cards, cards_down[:len(flop)]), past_bet/past_pot])
+            if past_pot > max_bet:
+                max_bet = past_pot
+        X = numpy.array(data)
+        kmeans = KMeans(n_clusters=3, random_state=0, n_init="auto").fit(X)
+        new_range = []
+        cluster_dict = {}
+        possible_bets = [0, pot*0.1, pot*0.2, pot*0.3, pot*0.4, pot*0.5, pot*0.6, pot*0.7, pot*0.8, pot*0.9, pot, pot*1.2, pot*1.4, pot*1.6, pot*1.8, pot*2, pot*3, pot*4, pot*5, pot*10, pot*20]
+        for hand in rangehands:
+            hand_score = self.calc_flop_score(hand, flop)
+            pred_cluster = kmeans.predict([hand_score, bet])
+            if pred_cluster in cluster_dict:
+                cluster_dict[pred_cluster] += 1
+            else: cluster_dict[pred_cluster] = 0
+        our_cluster = []
+        for cluster in cluster_dict.keys():
+            if cluster_dict[cluster] == max(cluster_dict.values()):
+                our_cluster.append(cluster)
+        for hand in rangehands:
+            cluster_dict = {}
+            hand_score = self.calc_flop_score(hand, flop)
+            for bet in possible_bets:
+                pred_cluster = kmeans.predict([hand_score, bet])
+                if pred_cluster in cluster_dict:
+                    cluster_dict[pred_cluster] += 1
+                else:
+                    cluster_dict[pred_cluster] = 0
+            for cluster in cluster_dict.keys():
+                if cluster_dict[cluster] == max(cluster_dict.values()) and cluster in our_cluster:
+                    new_range.append(hand)
+        return new_range
