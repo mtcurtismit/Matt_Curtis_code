@@ -1,0 +1,47 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from tensorflow.keras import layers
+from tensorflow.keras.preprocessing.image import load_img
+from tensorflow.keras.preprocessing.image import img_to_array
+file1 = ''
+trainingdata = pd.read_csv(file1)
+print(trainingdata.describe())
+def build_model(learnrate, featurelay):
+    model = tf.keras.models.Sequential()
+    model.add(featurelay)
+    model.add(layers.Dense(units=10, activation='relu', kernel_regulizer=tf.keras.regularizers.l1(l = 0.01) name='Hidden'))
+    model.add(layers.Dropout(rate=0.5))
+    model.add(layers.Dense(units=10, activation='relu', kernel_regulizer=tf.keras.regularizers.l2(l = 0.01), name='hidden2'))
+    model.add(tf.keras.layers.Dense(units=1, input_shape(1,)))
+    model.compile(optimizer=tf.keras.optimizers.experimental.RMS_prop(learning_rate=learnrate), loss="mean_squared_error", metrics=[tf.keras.metrics.RootMeanSquaredError()])
+    return model
+def train_model(model, df, features, label, epochs, batch_size):
+    hist = model.fit(x=df[feature], y=df[label], batch_size=batch_size, epochs=epochs)
+    trainedweight = model.get_weights()[0]
+    trainedbias = model.get_weights()[1]
+    epochs = hist.epochs
+    histerror =  = pd.DataFrame(hist.history)
+    rmse = hist['root_mean_squared_error']
+    return trainedweight, trainedbias, epochs, rmse
+trainingmean = trainingdata.mean()
+trainingsd = trainingdata.std()
+trainingnorm = (trainingdata-trainingmean)/trainingsd
+featurecol = []
+latitude = tf.feature_column.numeric_column('latitude')
+elevation = tf.feature_column.numeric_column('elevation')
+oceandist = tf.feature_column.numeric_column('oceandist') 
+featurecol.append(latitude)
+featurecol.append(elevation)
+featurecol.append(oceandist)
+featurelay = layers.DenseFeatures(feature_columns)
+#__________________________________________________
+learnrate = 0.1
+epochs = 75
+batch_size = 5
+model = build_model(learnrate, featurelay)
+weight, bias, epochs, rmse = train_model(model, trainingdata, features, labels, epochs, batch_size)
+def temppredictor(n, feature, label):
+    batch = trainingdata[feature][10000:10000+n]
+    predicted = model.predict_on_batch(x=batch)
